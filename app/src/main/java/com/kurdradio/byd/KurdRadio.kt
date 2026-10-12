@@ -447,7 +447,7 @@ class MainActivity : AppCompatActivity() {
         AppCompatDelegate.setApplicationLocales(LocaleListCompat.forLanguageTags(tag))
     }
 
-    fun setAccent(c: Int) { accent = c; prefs.color = c }
+    fun changeAccent(c: Int) { accent = c; prefs.color = c }
 
     // ---------- FM / AM (car's own radio app) ----------
     private val knownRadioPkgs = listOf(
@@ -776,7 +776,7 @@ fun SettingsScreen(act: MainActivity) {
                         Modifier.size(54.dp).clip(CircleShape).background(Color(c))
                             .border(if (act.accent == c) 4.dp else 1.dp,
                                 if (act.accent == c) Color.White else Color.Gray, CircleShape)
-                            .clickable { act.setAccent(c) }
+                            .clickable { act.changeAccent(c) }
                     )
                 }
             }
