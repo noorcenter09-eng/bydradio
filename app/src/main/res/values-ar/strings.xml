@@ -33,4 +33,12 @@
     <string name="scanning_hint">جارٍ البحث عن المحطات… اضغط «إيقاف عند هذه» للبقاء على المحطة الحالية</string>
     <string name="search_hint">ابحث عن محطة</string>
     <string name="favorites_short">المفضلة</string>
+    <string name="save">حفظ</string>
+    <string name="add_station">إضافة محطة</string>
+    <string name="station_name">اسم المحطة</string>
+    <string name="station_url">رابط البث (http...)</string>
+    <string name="theme">المظهر</string>
+    <string name="theme_system">النظام</string>
+    <string name="theme_dark">داكن</string>
+    <string name="theme_light">فاتح</string>
 </resources>

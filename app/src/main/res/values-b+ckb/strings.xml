@@ -33,4 +33,12 @@
     <string name="scanning_hint">ستێیشنەکان دەگەڕێت… «ئەمە بمێنێتەوە» دابگرە بۆ مانەوە لەسەر ستێیشنی ئێستا</string>
     <string name="search_hint">بگەڕێ بۆ ستێیشن</string>
     <string name="favorites_short">دڵخواز</string>
+    <string name="save">پاشەکەوت</string>
+    <string name="add_station">زیادکردنی ستێیشن</string>
+    <string name="station_name">ناوی ستێیشن</string>
+    <string name="station_url">لینکی پەخش (http...)</string>
+    <string name="theme">ڕووکار</string>
+    <string name="theme_system">سیستەم</string>
+    <string name="theme_dark">تاریک</string>
+    <string name="theme_light">ڕووناک</string>
 </resources>

@@ -10,3 +10,7 @@
 - All Kotlin code is in ONE file: `app/src/main/java/com/kurdradio/byd/KurdRadio.kt`
 - Texts (3 languages): `app/src/main/res/values*/strings.xml`
 - Android needs `AndroidManifest.xml` and the Gradle files separately - they cannot be merged.
+
+## Custom stations without an app update
+Edit `stations.json` on GitHub (format: `[{"name":"...","url":"http://...","kind":"ku"}]`, kind = `ku` or `ar`).
+The app loads it every time it fetches stations (press the refresh button).
