@@ -58,6 +58,10 @@
                 android:value="true" />
         </service>
 
+        <receiver
+            android:name=".InstallReceiver"
+            android:exported="false" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

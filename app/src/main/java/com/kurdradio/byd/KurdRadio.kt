@@ -6,10 +6,13 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.ComponentName
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.MutableContextWrapper
+import android.content.pm.PackageInstaller
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -17,8 +20,10 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.provider.MediaStore
 import android.provider.Settings
 import android.view.ViewGroup
+import android.widget.Toast
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -77,6 +82,8 @@ import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.async
@@ -113,6 +120,10 @@ class Prefs(ctx: Context) {
         get() = sp.getString("radioPkg", null)
         set(v) { sp.edit().putString("radioPkg", v).apply() }
 
+    var cacheTime: Long
+        get() = sp.getLong("cacheTime", 0L)
+        set(v) { sp.edit().putLong("cacheTime", v).apply() }
+
     var lastTab: Int
         get() = sp.getInt("lastTab", 0)
         set(v) { sp.edit().putInt("lastTab", v).apply() }
@@ -148,23 +159,45 @@ class Prefs(ctx: Context) {
 }
 
 object StationRepo {
-    private val hosts = listOf(
+    private val fallbackHosts = listOf(
         "https://de1.api.radio-browser.info",
+        "https://de2.api.radio-browser.info",
+        "https://fi1.api.radio-browser.info",
         "https://nl1.api.radio-browser.info",
         "https://at1.api.radio-browser.info"
     )
+    @Volatile private var hostList: List<String>? = null
+    @Volatile private var good: String? = null
 
     private fun httpGet(url: String): String {
         val c = URL(url).openConnection() as HttpURLConnection
-        c.connectTimeout = 8000
-        c.readTimeout = 25000
+        c.connectTimeout = 6000
+        c.readTimeout = 20000
         c.setRequestProperty("User-Agent", "KurdRadio/1.0")
         return c.inputStream.bufferedReader().use { it.readText() }
     }
 
+    /** asks the directory for its live servers (the fixed ones are sometimes down) */
+    @Synchronized
+    private fun hosts(): List<String> {
+        hostList?.let { return it }
+        val found = try {
+            val a = JSONArray(httpGet("https://all.api.radio-browser.info/json/servers"))
+            (0 until a.length()).map { "https://" + a.getJSONObject(it).getString("name") }.distinct().shuffled()
+        } catch (e: Exception) { emptyList() }
+        val list = (found + fallbackHosts).distinct()
+        hostList = list
+        return list
+    }
+
     private fun get(path: String): String {
-        for (h in hosts) {
-            try { return httpGet(h + path) } catch (e: Exception) { /* next host */ }
+        val order = listOfNotNull(good) + hosts().filter { it != good }
+        for (h in order.take(6)) {
+            try {
+                val r = httpGet(h + path)
+                good = h
+                return r
+            } catch (e: Exception) { /* next host */ }
         }
         throw java.io.IOException("network")
     }
@@ -183,30 +216,26 @@ object StationRepo {
         }
     }
 
+    /** Light download (about 10 requests) - done at most once a day. */
     suspend fun fetch(): List<Station> = withContext(Dispatchers.IO) {
         val q = "&hidebroken=true&order=clickcount&reverse=true"
-        val jobs = ArrayList<Pair<String, Boolean>>()
-        jobs.add("/json/stations/search?countrycode=IQ&limit=1000$q" to false)
-        listOf("kurdish", "sorani", "kurmanji", "badini", "central kurdish").forEach {
-            jobs.add("/json/stations/search?language=$it&limit=1000$q" to true)
-        }
-        listOf("kurdish", "kurdistan", "kurd").forEach {
-            jobs.add("/json/stations/search?tag=$it&limit=500$q" to true)
-        }
-        listOf(
-            "kurd", "kurdistan", "kurdsat", "rudaw", "speda", "erbil", "hawler", "sulaymaniyah",
-            "slemani", "duhok", "dohuk", "kirkuk", "zakho", "halabja", "soran", "badinan"
-        ).forEach { jobs.add("/json/stations/search?name=$it&limit=300$q" to true) }
-        listOf("kurdistan", "erbil", "sulaymaniyah", "duhok", "kirkuk").forEach {
-            jobs.add("/json/stations/search?state=$it&limit=300$q" to true)
-        }
-
+        val jobs = listOf(
+            "/json/stations/search?countrycode=IQ&limit=1000$q" to false,
+            "/json/stations/search?language=kurdish&limit=600$q" to true,
+            "/json/stations/search?language=sorani&limit=300$q" to true,
+            "/json/stations/search?language=kurmanji&limit=300$q" to true,
+            "/json/stations/search?tag=kurdish&limit=300$q" to true,
+            "/json/stations/search?name=kurd&limit=300$q" to true,
+            "/json/stations/search?name=erbil&limit=100$q" to true,
+            "/json/stations/search?name=hawler&limit=100$q" to true,
+            "/json/stations/search?name=sulaymaniyah&limit=100$q" to true,
+            "/json/stations/search?name=duhok&limit=100$q" to true
+        )
         val results = coroutineScope {
             jobs.map { (path, force) ->
                 async { runCatching { get(path) }.getOrNull()?.let { it to force } }
             }.awaitAll()
         }
-
         val others = LinkedHashMap<String, Station>()
         for (r in results) {
             if (r != null) try { parse(r.first, r.second, others) } catch (e: Exception) { }
@@ -228,9 +257,18 @@ object StationRepo {
                 }
             } catch (e: Exception) { }
         }
-        for ((u, s) in others) if (!result.containsKey(u)) result[u] = s
+        for ((u, st) in others) if (!result.containsKey(u)) result[u] = st
         if (result.isEmpty()) throw java.io.IOException("empty")
         result.values.toList()
+    }
+
+    /** Live search of the whole online directory by name. */
+    suspend fun search(q: String): List<Station> = withContext(Dispatchers.IO) {
+        val enc = java.net.URLEncoder.encode(q.trim(), "UTF-8")
+        val json = get("/json/stations/search?name=$enc&limit=200&hidebroken=true&order=clickcount&reverse=true")
+        val out = LinkedHashMap<String, Station>()
+        parse(json, false, out)
+        out.values.toList()
     }
 }
 
@@ -286,20 +324,97 @@ object Updater {
             file
         }
 
-    fun install(ctx: Context, file: File) {
+    /**
+     * Tries 3 ways to install the APK. Returns null when an installer was started,
+     * otherwise a short message for the user.
+     */
+    suspend fun install(ctx: Context, file: File, url: String): String? {
+        // 0) "install unknown apps" permission
         if (Build.VERSION.SDK_INT >= 26 && !ctx.packageManager.canRequestPackageInstalls()) {
-            ctx.startActivity(
-                Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${ctx.packageName}"))
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            )
-            return
+            try {
+                ctx.startActivity(
+                    Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${ctx.packageName}"))
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+                return ctx.getString(R.string.allow_install_hint)
+            } catch (e: Exception) { /* no such settings screen on this head unit: keep trying */ }
         }
-        val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", file)
-        ctx.startActivity(
-            Intent(Intent.ACTION_VIEW)
-                .setDataAndType(uri, "application/vnd.android.package-archive")
-                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-        )
+        // 1) the normal Android installer screen
+        try {
+            val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", file)
+            ctx.startActivity(
+                Intent(Intent.ACTION_VIEW)
+                    .setDataAndType(uri, "application/vnd.android.package-archive")
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+            return null
+        } catch (e: Exception) { /* no installer screen: try the session API */ }
+        // 2) PackageInstaller session
+        try {
+            withContext(Dispatchers.IO) { sessionInstall(ctx, file) }
+            return null
+        } catch (e: Exception) { /* fall back to a manual install */ }
+        // 3) save to Downloads + open the link in the browser
+        val saved = withContext(Dispatchers.IO) { saveToDownloads(ctx, file) }
+        try {
+            ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        } catch (e: Exception) { }
+        return if (saved) ctx.getString(R.string.update_saved) else ctx.getString(R.string.update_error)
+    }
+
+    private fun sessionInstall(ctx: Context, file: File) {
+        val pi = ctx.packageManager.packageInstaller
+        val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
+        val id = pi.createSession(params)
+        val session = pi.openSession(id)
+        try {
+            file.inputStream().use { input ->
+                session.openWrite("update", 0, file.length()).use { out ->
+                    input.copyTo(out)
+                    session.fsync(out)
+                }
+            }
+            val intent = Intent(ctx, InstallReceiver::class.java).setAction("com.kurdradio.byd.INSTALL_RESULT")
+            val flags = PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0)
+            val pending = PendingIntent.getBroadcast(ctx, id, intent, flags)
+            session.commit(pending.intentSender)
+        } finally {
+            session.close()
+        }
+    }
+
+    private fun saveToDownloads(ctx: Context, file: File): Boolean {
+        if (Build.VERSION.SDK_INT < 29) return false
+        return try {
+            val cv = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, "BYDRadio.apk")
+                put(MediaStore.Downloads.MIME_TYPE, "application/vnd.android.package-archive")
+                put(MediaStore.Downloads.RELATIVE_PATH, "Download")
+            }
+            val uri = ctx.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv) ?: return false
+            ctx.contentResolver.openOutputStream(uri)?.use { out -> file.inputStream().use { it.copyTo(out) } }
+            true
+        } catch (e: Exception) { false }
+    }
+}
+
+/** Receives the result of a PackageInstaller session and opens the confirm screen. */
+class InstallReceiver : BroadcastReceiver() {
+    @Suppress("DEPRECATION")
+    override fun onReceive(ctx: Context, intent: Intent) {
+        when (intent.getIntExtra(PackageInstaller.EXTRA_STATUS, -1)) {
+            PackageInstaller.STATUS_PENDING_USER_ACTION -> {
+                val confirm: Intent? = intent.getParcelableExtra(Intent.EXTRA_INTENT)
+                if (confirm != null) {
+                    confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    ctx.startActivity(confirm)
+                }
+            }
+            PackageInstaller.STATUS_SUCCESS -> { }
+            else -> Toast.makeText(
+                ctx, intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE) ?: "Install failed", Toast.LENGTH_LONG
+            ).show()
+        }
     }
 }
 
@@ -555,11 +670,18 @@ class MainActivity : AppCompatActivity() {
     var onlineKind by mutableStateOf("ku")
     var onlineQuery by mutableStateOf("")
     var offlineQuery by mutableStateOf("")
-    val listStates = mapOf("ku" to LazyListState(), "ar" to LazyListState(), "fav" to LazyListState())
+    val listStates = mapOf("ku" to LazyListState(), "ar" to LazyListState(), "fav" to LazyListState(), "all" to LazyListState())
     val offlineListState = LazyListState()
+    var searchResults by mutableStateOf<List<Station>>(emptyList())
+    var searching by mutableStateOf(false)
+    var playerStatus by mutableStateOf("")
+    private var searchJob: Job? = null
+    private var pending: Pair<List<Station>, Int>? = null
+    private var retry = 0
     var updateInfo by mutableStateOf<Updater.Info?>(null)
     var updateProgress by mutableStateOf(-1)
     var updateError by mutableStateOf(false)
+    var updateDetail by mutableStateOf("")
 
     private val handler = Handler(Looper.getMainLooper())
     private val scanStep = object : Runnable {
@@ -580,7 +702,6 @@ class MainActivity : AppCompatActivity() {
         themeMode = prefs.themeMode
         favs.addAll(prefs.loadStations("favs"))
         custom.addAll(prefs.loadStations("custom"))
-        stations = prefs.loadStations("cache")
         tab = Tab.values().getOrElse(prefs.lastTab) { Tab.ONLINE }
         onlineKind = prefs.lastKind
         if (tab == Tab.YOUTUBE || YT.web != null) startYoutubeService()
@@ -594,7 +715,7 @@ class MainActivity : AppCompatActivity() {
         ) notifPerm.launch(Manifest.permission.POST_NOTIFICATIONS)
 
         connectPlayer()
-        loadStations()
+        initStations()
         checkUpdateSilently()
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
@@ -631,18 +752,48 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ---------- stations ----------
-    fun loadStations() {
+    private fun initStations() {
+        scope.launch {
+            val c = withContext(Dispatchers.Default) { prefs.loadStations("cache") }
+            stations = c
+            loadStations()
+        }
+    }
+
+    fun loadStations(force: Boolean = false) {
+        val fresh = stations.size >= 30 &&
+            System.currentTimeMillis() - prefs.cacheTime < 24L * 3600 * 1000
+        if (!force && fresh) return
         scope.launch {
             loading = true
             loadError = false
             try {
+                if (!force && stations.isNotEmpty()) delay(2000) // let the UI settle first
                 val r = StationRepo.fetch()
                 stations = r
-                prefs.saveStations("cache", r)
+                withContext(Dispatchers.IO) {
+                    prefs.saveStations("cache", r)
+                    if (r.size >= 30) prefs.cacheTime = System.currentTimeMillis()
+                }
             } catch (e: Exception) {
                 loadError = stations.isEmpty()
             }
             loading = false
+        }
+    }
+
+    fun searchRemote(q: String) {
+        searchJob?.cancel()
+        if (q.trim().length < 2) { searchResults = emptyList(); searching = false; return }
+        searchJob = scope.launch {
+            delay(500)
+            searching = true
+            try {
+                searchResults = StationRepo.search(q)
+            } catch (e: Exception) {
+                searchResults = emptyList()
+            }
+            searching = false
         }
     }
 
@@ -671,18 +822,25 @@ class MainActivity : AppCompatActivity() {
         val token = SessionToken(this, ComponentName(this, PlaybackService::class.java))
         val f = MediaController.Builder(this, token).buildAsync()
         f.addListener({
-            val c = f.get()
-            c.addListener(object : Player.Listener {
-                override fun onIsPlayingChanged(p: Boolean) { isPlaying = p }
-                override fun onMediaItemTransition(item: MediaItem?, reason: Int) { syncNow(item) }
-            })
-            syncNow(c.currentMediaItem)
-            if (c.currentMediaItem == null) {
-                // service was restarted: show the last station, play button resumes it
-                prefs.loadStations("last").firstOrNull()?.let { nowTitle = it.name; nowUrl = it.url }
+            try {
+                val c = f.get()
+                c.addListener(object : Player.Listener {
+                    override fun onIsPlayingChanged(p: Boolean) { isPlaying = p }
+                    override fun onMediaItemTransition(item: MediaItem?, reason: Int) { syncNow(item) }
+                })
+                syncNow(c.currentMediaItem)
+                if (c.currentMediaItem == null) {
+                    // service was restarted: show the last station, play button resumes it
+                    prefs.loadStations("last").firstOrNull()?.let { nowTitle = it.name; nowUrl = it.url }
+                }
+                isPlaying = c.isPlaying
+                controller = c
+                playerStatus = ""
+                pending?.let { pending = null; playList(it.first, it.second) }
+            } catch (e: Exception) {
+                playerStatus = "Player: " + (e.cause?.message ?: e.message ?: e.javaClass.simpleName)
+                if (retry++ < 5) handler.postDelayed({ connectPlayer() }, 2000)
             }
-            isPlaying = c.isPlaying
-            controller = c
         }, ContextCompat.getMainExecutor(this))
     }
 
@@ -690,13 +848,14 @@ class MainActivity : AppCompatActivity() {
         if (item == null) return
         nowUrl = item.localConfiguration?.uri?.toString() ?: item.mediaId
         nowTitle = item.mediaMetadata.title?.toString() ?: ""
-        val kind = allStations().firstOrNull { it.url == nowUrl }?.kind ?: "ku"
+        val kind = (stations.firstOrNull { it.url == nowUrl } ?: custom.firstOrNull { it.url == nowUrl })?.kind ?: "ku"
         prefs.saveStations("last", listOf(Station(nowTitle, nowUrl, kind)))
     }
 
     /** Sets the whole list as the queue, so steering-wheel next/previous work. */
     fun playList(list: List<Station>, index: Int) {
-        val c = controller ?: return
+        val c = controller
+        if (c == null) { pending = list to index; return }
         if (index !in list.indices) return
         val (sub, idx) = windowOf(list, index)
         c.setMediaItems(sub.map { it.toItem() }, idx, 0L)
@@ -756,17 +915,22 @@ class MainActivity : AppCompatActivity() {
     }
 
     fun runUpdate() {
-        val url = updateInfo?.apk ?: return
+        val info = updateInfo ?: return
+        val url = info.apk
+        if (url == null) { updateError = true; updateDetail = getString(R.string.no_apk); return }
         scope.launch {
+            updateError = false
+            updateDetail = ""
             try {
-                updateError = false
                 updateProgress = 0
                 val f = Updater.download(this@MainActivity, url) { updateProgress = it }
                 updateProgress = -1
-                Updater.install(this@MainActivity, f)
+                val msg = Updater.install(this@MainActivity, f, url)
+                if (msg != null) updateDetail = msg
             } catch (e: Exception) {
                 updateProgress = -1
                 updateError = true
+                updateDetail = "${e.javaClass.simpleName}: ${e.message}"
             }
         }
     }
@@ -870,6 +1034,7 @@ fun App(act: MainActivity) {
                                 Text(stringResource(R.string.update_error), fontSize = 16.sp,
                                     color = MaterialTheme.colorScheme.error)
                             }
+                            if (act.updateDetail.isNotBlank()) Text(act.updateDetail, fontSize = 15.sp)
                         }
                     },
                     confirmButton = {
@@ -923,6 +1088,14 @@ fun Root(act: MainActivity) {
                             }
                         }
                         MiniPlayer(act, Modifier.align(Alignment.BottomCenter))
+                    }
+                    if (act.playerStatus.isNotBlank()) {
+                        Text(
+                            act.playerStatus,
+                            Modifier.align(Alignment.TopCenter).padding(8.dp)
+                                .background(Color(0xCCB00020)).padding(8.dp),
+                            color = Color.White, fontSize = 14.sp
+                        )
                     }
                 }
             }
@@ -1035,19 +1208,31 @@ fun OnlineScreen(act: MainActivity) {
     var showAdd by remember { mutableStateOf(false) }
     val pal = LocalPal.current
 
-    val base = if (kind == "fav") act.favs.toList() else act.allStations().filter { it.kind == kind }
-    val shown = base.filter { query.isBlank() || it.name.contains(query, ignoreCase = true) }
+    LaunchedEffect(kind, query) { if (kind == "all") act.searchRemote(query) }
+
+    val all = remember(act.stations, act.custom.size) { act.allStations() }
+    val base = remember(kind, all, act.favs.size, act.searchResults) {
+        when (kind) {
+            "fav" -> act.favs.toList()
+            "all" -> act.searchResults
+            else -> all.filter { it.kind == kind }
+        }
+    }
+    val shown = remember(base, query, kind) {
+        if (kind == "all" || query.isBlank()) base else base.filter { it.name.contains(query, ignoreCase = true) }
+    }
 
     Column(Modifier.fillMaxSize()) {
         Row(
             Modifier.padding(16.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             listOf(
                 "ku" to "🟢 " + stringResource(R.string.kurdish),
                 "ar" to "🔵 " + stringResource(R.string.arabic),
-                "fav" to "⭐ " + stringResource(R.string.favorites_short)
+                "fav" to "⭐ " + stringResource(R.string.favorites_short),
+                "all" to "🌐"
             ).forEach { (k, l) ->
                 val sel = kind == k
                 Button(
@@ -1056,17 +1241,22 @@ fun OnlineScreen(act: MainActivity) {
                         containerColor = if (sel) MaterialTheme.colorScheme.primary else pal.card,
                         contentColor = if (sel) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
                     )
-                ) { Text(l, fontSize = 20.sp, modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)) }
+                ) { Text(l, fontSize = 20.sp, modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)) }
             }
             Text("➕", fontSize = 28.sp, modifier = Modifier.clickable { showAdd = true }.padding(8.dp))
-            Text("🔄", fontSize = 28.sp, modifier = Modifier.clickable { act.loadStations() }.padding(8.dp))
+            Text("🔄", fontSize = 28.sp, modifier = Modifier.clickable { act.loadStations(true) }.padding(8.dp))
             Text("${shown.size}", fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
         }
         SearchScanBar(act, query, { act.onlineQuery = it }, shown)
-        if (act.loading) Text(stringResource(R.string.loading), Modifier.padding(20.dp), fontSize = 20.sp)
+        if (act.loading || (kind == "all" && act.searching)) {
+            Text(stringResource(R.string.loading), Modifier.padding(20.dp), fontSize = 20.sp)
+        }
+        if (kind == "all" && !act.searching && shown.isEmpty()) {
+            Text(stringResource(R.string.search_online_hint), Modifier.padding(20.dp), fontSize = 18.sp)
+        }
         if (act.loadError) {
             Text(stringResource(R.string.no_net), Modifier.padding(20.dp), fontSize = 20.sp)
-            Button(onClick = { act.loadStations() }, modifier = Modifier.padding(horizontal = 20.dp)) {
+            Button(onClick = { act.loadStations(true) }, modifier = Modifier.padding(horizontal = 20.dp)) {
                 Text(stringResource(R.string.retry), fontSize = 18.sp)
             }
         }
@@ -1264,22 +1454,9 @@ fun SettingsScreen(act: MainActivity) {
                     Text(i.notes, fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
                 }
                 item {
-                    if (progress in 0..99) {
-                        Text(stringResource(R.string.downloading, progress), fontSize = 20.sp)
-                    } else {
-                        Button(onClick = {
-                            val url = i.apk
-                            if (url == null) { status = noApk; return@Button }
-                            scope.launch {
-                                try {
-                                    progress = 0
-                                    val f = Updater.download(act, url) { progress = it }
-                                    progress = -1
-                                    Updater.install(act, f)
-                                } catch (e: Exception) { progress = -1; status = sErr }
-                            }
-                        }) { Text(stringResource(R.string.download_install), fontSize = 20.sp, modifier = Modifier.padding(8.dp)) }
-                    }
+                    Button(onClick = {
+                        if (i.apk == null) { status = noApk } else { act.updateInfo = i; act.runUpdate() }
+                    }) { Text(stringResource(R.string.download_install), fontSize = 20.sp, modifier = Modifier.padding(8.dp)) }
                 }
             }
         }

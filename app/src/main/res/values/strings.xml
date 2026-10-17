@@ -41,4 +41,7 @@
     <string name="theme_system">System</string>
     <string name="theme_dark">Dark</string>
     <string name="theme_light">Light</string>
+    <string name="allow_install_hint">Allow installing from this app in the settings, then press the button again.</string>
+    <string name="update_saved">Saved in Downloads as BYDRadio.apk. Open it from the Files app to install.</string>
+    <string name="search_online_hint">Type a station name above to search the whole online directory.</string>
 </resources>

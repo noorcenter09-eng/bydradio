@@ -5,7 +5,6 @@ plugins {
 
 val verCode = (project.findProperty("verCode") as String?)?.toIntOrNull() ?: 1
 val ghRepo = (project.findProperty("ghRepo") as String?) ?: ""
-val ksPath: String? = System.getenv("KEYSTORE_PATH")
 
 android {
     namespace = "com.kurdradio.byd"
@@ -21,21 +20,18 @@ android {
     }
 
     signingConfigs {
-        if (ksPath != null) {
-            create("release") {
-                storeFile = file(ksPath)
-                storePassword = System.getenv("KEYSTORE_PASSWORD")
-                keyAlias = System.getenv("KEY_ALIAS")
-                keyPassword = System.getenv("KEYSTORE_PASSWORD")
-            }
+        create("release") {
+            storeFile = file("bydradio.jks")
+            storePassword = "bydradio123"
+            keyAlias = "bydradio"
+            keyPassword = "bydradio123"
         }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = if (ksPath != null) signingConfigs.getByName("release")
-                            else signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 

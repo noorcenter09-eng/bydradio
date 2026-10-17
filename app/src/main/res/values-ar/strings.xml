@@ -41,4 +41,7 @@
     <string name="theme_system">النظام</string>
     <string name="theme_dark">داكن</string>
     <string name="theme_light">فاتح</string>
+    <string name="allow_install_hint">اسمح بالتثبيت من هذا التطبيق في الإعدادات ثم اضغط الزر مرة أخرى.</string>
+    <string name="update_saved">تم الحفظ في التنزيلات باسم BYDRadio.apk. افتحه من تطبيق الملفات للتثبيت.</string>
+    <string name="search_online_hint">اكتب اسم المحطة بالأعلى للبحث في الدليل الكامل على الإنترنت.</string>
 </resources>

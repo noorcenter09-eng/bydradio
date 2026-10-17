@@ -17,20 +17,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: 8.7
-      - name: Prepare keystore
-        env:
-          KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
-        run: |
-          if [ -n "$KS_B64" ]; then
-            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
-            echo "KEYSTORE_PATH=$RUNNER_TEMP/release.jks" >> $GITHUB_ENV
-            echo "KEY_ALIAS=bydradio" >> $GITHUB_ENV
-          else
-            echo "::warning::KEYSTORE_BASE64 secret missing - using debug signing (updates will not install over older builds)"
-          fi
       - name: Build
-        env:
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
         run: gradle assembleRelease --no-daemon -PverCode=${{ github.run_number }} -PghRepo=${{ github.repository }}
       - name: Rename APK
         run: cp app/build/outputs/apk/release/app-release.apk BYDRadio.apk
